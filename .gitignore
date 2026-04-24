@@ -1,0 +1,10 @@
+data/raw/
+data/processed/
+data/external/
+saved_models/
+__pycache__/
+*.pyc
+.DS_Store
+.env
+node_modules/
+.next/
