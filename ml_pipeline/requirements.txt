@@ -1,0 +1,25 @@
+# Core Deep Learning & NLP
+torch>=2.0.0
+transformers>=4.30.0
+spacy>=3.5.0
+nltk>=3.8.1
+
+# Vector Search (FAISS)
+faiss-cpu>=1.7.4  # Use faiss-gpu if CUDA is available
+
+# PDF Processing & OCR
+PyMuPDF>=1.22.0   # highly efficient PDF parser (fitz)
+pdfplumber>=0.10.0
+pytesseract>=0.3.10 # optional for image-based PDFs
+
+# Data Handling & Utils
+pandas>=2.0.0
+numpy>=1.24.0
+scikit-learn>=1.2.2
+datasets>=2.12.0
+tqdm>=4.65.0
+huggingface-hub>=0.14.0
+
+# API / Serving (if models are exposed directly here, otherwise backend)
+fastapi
+uvicorn
