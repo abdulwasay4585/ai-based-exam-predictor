@@ -96,15 +96,15 @@ class MasterExamOrchestrator:
             
             if model_choice == "option2" and self.custom_gen_model:
                 input_text = f"generate question: {context_chunk[:500]}"
-                inputs = self.custom_gen_tokenizer(input_text, return_tensors="pt", truncation=True, max_length=512)
+                inputs = self.custom_gen_tokenizer(input_text, return_tensors="pt", truncation=True, max_length=1024)
                 with torch.no_grad():
-                    outputs = self.custom_gen_model.generate(**inputs, max_length=100)
+                    outputs = self.custom_gen_model.generate(**inputs, max_length=200)
                     question_text = self.custom_gen_tokenizer.decode(outputs[0], skip_special_tokens=True)
             else:
                 question_text = self.rag.generate_predicted_question(
                     topic_query=primary_topic, 
                     context_override=context_chunk,
-                    max_new_tokens=128
+                    max_new_tokens=256
                 )
             
             q_prob = self.nlp_engine.calculate_question_probability(question_text, hot_topics, corpus_preprocessed=corpus_preprocessed)
@@ -149,9 +149,9 @@ class MasterExamOrchestrator:
             print(f"\n[Solve] Answering question {i+1}/{len(target_questions)}...")
             if model_choice == "option2" and self.custom_gen_model:
                 input_text = f"answer question: {q}"
-                inputs = self.custom_gen_tokenizer(input_text, return_tensors="pt", truncation=True, max_length=512)
+                inputs = self.custom_gen_tokenizer(input_text, return_tensors="pt", truncation=True, max_length=1024)
                 with torch.no_grad():
-                    outputs = self.custom_gen_model.generate(**inputs, max_length=200)
+                    outputs = self.custom_gen_model.generate(**inputs, max_length=400)
                     answer = self.custom_gen_tokenizer.decode(outputs[0], skip_special_tokens=True)
             else:
                 answer = self.rag.generate_model_answer(exam_question=q, course_notes_context=full_text)

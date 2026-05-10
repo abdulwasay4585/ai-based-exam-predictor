@@ -29,7 +29,7 @@ class ExamRAGPipeline:
         ]
         prompt = self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         inputs = self.tokenizer([prompt], return_tensors="pt")
-        outputs = self.model.generate(**inputs, max_new_tokens=20, do_sample=False, pad_token_id=self.tokenizer.eos_token_id)
+        outputs = self.model.generate(**inputs, max_new_tokens=40, do_sample=False, pad_token_id=self.tokenizer.eos_token_id)
         output_ids = outputs[0][inputs.input_ids.shape[1]:]
         return self.tokenizer.decode(output_ids, skip_special_tokens=True).strip()
 
@@ -37,7 +37,7 @@ class ExamRAGPipeline:
         self, 
         topic_query: str, 
         context_override: Optional[str] = None,
-        max_new_tokens: int = 150 
+        max_new_tokens: int = 300 
     ) -> str:
         print(f"\n[RAG Generation] Synthesizing question for: '{topic_query}'")
         aggregated_context = (context_override[:500] if context_override else "General academic concepts.")
@@ -57,7 +57,7 @@ class ExamRAGPipeline:
         self, 
         exam_question: str, 
         course_notes_context: str,
-        max_new_tokens: int = 1500 
+        max_new_tokens: int = 3000 
     ) -> str:
         print(f"\n[RAG Answer] Generating answer for: '{exam_question[:60]}...'")
         best_context = course_notes_context[:4500] 
