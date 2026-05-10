@@ -95,7 +95,7 @@ class MasterExamOrchestrator:
             context_chunk = snippets[i % len(snippets)] if snippets else full_text[:1000]
             
             if model_choice == "option2" and self.custom_gen_model:
-                input_text = f"generate question: {context_chunk[:500]}"
+                input_text = f"generate question: (format all math in LaTeX using $$ symbols) {context_chunk[:500]}"
                 inputs = self.custom_gen_tokenizer(input_text, return_tensors="pt", truncation=True, max_length=1024)
                 with torch.no_grad():
                     outputs = self.custom_gen_model.generate(**inputs, max_length=200)
@@ -148,7 +148,7 @@ class MasterExamOrchestrator:
         for i, q in enumerate(target_questions):
             print(f"\n[Solve] Answering question {i+1}/{len(target_questions)}...")
             if model_choice == "option2" and self.custom_gen_model:
-                input_text = f"answer question: {q}"
+                input_text = f"answer question: (format all math in LaTeX using $$ symbols) {q}"
                 inputs = self.custom_gen_tokenizer(input_text, return_tensors="pt", truncation=True, max_length=1024)
                 with torch.no_grad():
                     outputs = self.custom_gen_model.generate(**inputs, max_length=400)
