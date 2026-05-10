@@ -21,37 +21,38 @@ FROM python:3.10-slim
 ENV PORT=7860
 ENV HOST=0.0.0.0
 
-WORKDIR /app
+# Create user first for correct permissions
+RUN useradd -m -u 1000 user
 
-# Install system dependencies (needed for PyMuPDF, faiss, etc.)
+# Install system dependencies as root
 RUN apt-get update && apt-get install -y \
     build-essential \
     libgl1 \
     libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy backend requirements and ML pipeline requirements
-COPY backend/requirements.txt /app/backend/requirements.txt
-COPY ml_pipeline/requirements.txt /app/ml_pipeline/requirements.txt
-
-# Install Python dependencies
-RUN pip install --no-cache-dir -r /app/ml_pipeline/requirements.txt
-RUN pip install --no-cache-dir -r /app/backend/requirements.txt
-
-# Copy backend and ML pipeline code
-COPY backend /app/backend
-COPY ml_pipeline /app/ml_pipeline
-
-# Copy built React files from Stage 1 into the backend's static directory
-COPY --from=frontend-builder /app/frontend/build /app/backend/app/static
-
-# Give user permissions (HuggingFace spaces requires non-root user for security)
-RUN useradd -m -u 1000 user
+# Switch to the non-root user
 USER user
 ENV HOME=/home/user \
 	PATH=/home/user/.local/bin:$PATH
 WORKDIR $HOME/app
+
+# Copy requirements
+COPY --chown=user backend/requirements.txt ./backend/requirements.txt
+COPY --chown=user ml_pipeline/requirements.txt ./ml_pipeline/requirements.txt
+
+# Install Python dependencies
+RUN pip install --no-cache-dir -r ./ml_pipeline/requirements.txt
+RUN pip install --no-cache-dir -r ./backend/requirements.txt
+
+# Explicitly download the spacy model to avoid runtime errors
+RUN python -m spacy download en_core_web_sm
+
+# Copy backend and ML pipeline code
 COPY --chown=user . $HOME/app
+
+# Copy built React files from Stage 1 into the backend's static directory OVERWRITING the local empty static dir if it exists
+COPY --from=frontend-builder --chown=user /app/frontend/build $HOME/app/backend/app/static
 
 # Start the FastAPI server using Uvicorn on Hugging Face's required port (7860)
 CMD ["uvicorn", "backend.app.main:app", "--host", "0.0.0.0", "--port", "7860"]
