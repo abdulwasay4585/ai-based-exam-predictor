@@ -1,4 +1,8 @@
 import torch
+import pandas as pd
+import argparse
+import os
+import json
 from torch.utils.data import Dataset
 from transformers import (
     AutoTokenizer, 
@@ -10,15 +14,11 @@ from sklearn.model_selection import train_test_split
 from typing import List
 
 class ExamTopicDataset(Dataset):
-    """
-    Custom PyTorch Dataset for loading Exam text and mapping it to correct topics.
-    """
     def __init__(self, encodings: dict, labels: List[int]):
         self.encodings = encodings
         self.labels = labels
 
     def __getitem__(self, idx):
-        # Convert dictionary of lists to a dictionary of tensors for PyTorch
         item = {key: torch.tensor(val[idx]) for key, val in self.encodings.items()}
         item['labels'] = torch.tensor(self.labels[idx])
         return item
@@ -27,91 +27,101 @@ class ExamTopicDataset(Dataset):
         return len(self.labels)
 
 def train_bert_for_topic_prediction(
-    texts: List[str], 
-    labels: List[int], 
-    num_labels: int,
+    train_path: str = "ml_pipeline/data/topic_data_train.json",
+    test_path: str = "ml_pipeline/data/topic_data_test.json",
     model_name: str = "bert-base-uncased",
-    output_dir: str = "../../saved_models/bert_topic_predictor",
+    output_dir: str = "saved_models/topic_classifier",
     epochs: int = 3,
-    batch_size: int = 8
+    batch_size: int = 16,
+    num_samples: int = None
 ):
-    """
-    Fine-tunes a pretrained BERT model on exam text to predict associated topic categories.
+    print(f"Loading data from {train_path}...")
+    if not os.path.exists(train_path):
+        print(f"Error: Data file not found at {train_path}.")
+        return
+
+    train_df = pd.read_json(train_path, lines=True)
+    test_df = pd.read_json(test_path, lines=True)
+
+    if num_samples:
+        train_df = train_df.sample(min(num_samples, len(train_df)))
+        test_df = test_df.sample(min(num_samples // 5, len(test_df)))
+
+    unique_topics = train_df['topic'].unique().tolist()
+    topic_to_id = {topic: i for i, topic in enumerate(unique_topics)}
+    id_to_topic = {i: topic for topic, i in topic_to_id.items()}
     
-    Args:
-        texts (List[str]): Raw or cleaned exam question texts.
-        labels (List[int]): Integer-encoded labels representing the correct topics.
-        num_labels (int): The total number of distinct topics.
-        model_name (str): HuggingFace pretrained model string.
-    """
-    
-    print(f"Loading '{model_name}' tokenizer & model...")
+    os.makedirs(output_dir, exist_ok=True)
+    with open(os.path.join(output_dir, "topic_mapping.json"), 'w') as f:
+        json.dump(id_to_topic, f)
+
+    train_texts = train_df['text'].tolist()
+    train_labels = train_df['topic'].map(topic_to_id).tolist()
+    val_texts = test_df['text'].tolist()
+    val_labels = test_df['topic'].map(topic_to_id).tolist()
+
+    print(f"Detected {len(unique_topics)} topics. Initializing model...")
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-    model = AutoModelForSequenceClassification.from_pretrained(model_name, num_labels=num_labels)
+    model = AutoModelForSequenceClassification.from_pretrained(model_name, num_labels=len(unique_topics))
 
-    # 1. Train / Validation Split
-    train_texts, val_texts, train_labels, val_labels = train_test_split(
-        texts, labels, test_size=0.2, random_state=42
-    )
-
-    # 2. Tokenize Data
-    print("Tokenizing datasets...")
     train_encodings = tokenizer(train_texts, truncation=True, padding=True, max_length=512)
     val_encodings = tokenizer(val_texts, truncation=True, padding=True, max_length=512)
 
-    # 3. Create PyTorch Datasets
     train_dataset = ExamTopicDataset(train_encodings, train_labels)
     val_dataset = ExamTopicDataset(val_encodings, val_labels)
 
-    # 4. Set up Training Arguments for HuggingFace Trainer
     training_args = TrainingArguments(
-        output_dir=output_dir,             # Path to save trained weights
-        num_train_epochs=epochs,           # Total epochs
-        per_device_train_batch_size=batch_size,  
+        output_dir=output_dir,
+        num_train_epochs=epochs,
+        per_device_train_batch_size=batch_size,
         per_device_eval_batch_size=batch_size * 2,
-        warmup_steps=100,                  # Linear warmup 
-        weight_decay=0.01,                 # L2 regularization to prevent overfitting
-        logging_dir='./logs',              
+        warmup_steps=100,
+        weight_decay=0.01,
+        logging_dir='./logs',
         logging_steps=10,
-        evaluation_strategy="epoch",
+        eval_strategy="epoch",
         save_strategy="epoch",
-        load_best_model_at_end=True,       # Ensures the best overall model is kept
-        fp16=torch.cuda.is_available()     # Mixed precision training if GPU is present
+        load_best_model_at_end=True,
+        fp16=False,
+        use_cpu=True,
+        report_to="none"
     )
 
-    # 5. Initialize Trainer
     trainer = Trainer(
-        model=model,                         
-        args=training_args,                  
-        train_dataset=train_dataset,         
-        eval_dataset=val_dataset             
+        model=model,
+        args=training_args,
+        train_dataset=train_dataset,
+        eval_dataset=val_dataset
     )
 
-    # 6. Run Training Loop
-    print(f"Beginning fine-tuning on device: {trainer.args.device}")
+    # Force CPU for demo
+    print("Beginning fine-tuning on CPU...")
     trainer.train()
 
-    # 7. Save Final Model and Tokenizer
     print(f"Saving finalized model and tokenizer to {output_dir}")
     model.save_pretrained(output_dir)
     tokenizer.save_pretrained(output_dir)
     
     return model, tokenizer
 
-# Example usage interface
 if __name__ == "__main__":
-    # Simulate data inputs that would normally load from our NLP Preprocessor Phase
-    mock_questions = [
-        "Explain backpropagation in deep neural networks.",
-        "How does a transformer handle self attention?",
-        "Define gradient descent and learning rate.",
-        "What is the time complexity of bubble sort?",
-        "Explain Dijkstra's algorithm for shortest paths."
-    ]
-    # Simulate categorical integer labels 
-    # e.g., 0: Deep Learning, 1: Algorithms
-    mock_labels = [0, 0, 0, 1, 1] 
-
-    # In a real environment, you run this block.
-    # train_bert_for_topic_prediction(mock_questions, mock_labels, num_labels=2)
-    pass
+    parser = argparse.ArgumentParser(description="Fine-tune BERT for Topic Prediction.")
+    parser.add_argument("--train_path", type=str, default="ml_pipeline/data/topic_data_train.json")
+    parser.add_argument("--test_path", type=str, default="ml_pipeline/data/topic_data_test.json")
+    parser.add_argument("--model_name", type=str, default="bert-base-uncased")
+    parser.add_argument("--output_dir", type=str, default="saved_models/topic_classifier")
+    parser.add_argument("--epochs", type=int, default=3)
+    parser.add_argument("--batch_size", type=int, default=16)
+    parser.add_argument("--num_samples", type=int, default=None, help="Number of samples to use (None for full).")
+    
+    args = parser.parse_args()
+    
+    train_bert_for_topic_prediction(
+        train_path=args.train_path,
+        test_path=args.test_path,
+        model_name=args.model_name,
+        output_dir=args.output_dir,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        num_samples=args.num_samples
+    )

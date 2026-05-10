@@ -1,158 +1,214 @@
 import json
 from typing import Dict, List, Any
+import os
+import torch
+import re
+from transformers import AutoTokenizer, AutoModelForSequenceClassification, T5Tokenizer, T5ForConditionalGeneration
 
 # Import our custom ML modules
 from models.trend_predictor import ExamTrendPredictor
-from data_processing.faiss_indexer import FaissExamIndexer
 from models.rag_generator import ExamRAGPipeline
+from utils.nlp_engine import ExamNLPEngine
 
 class MasterExamOrchestrator:
-    """
-    End-to-end integration pipeline that takes raw statistical histories and syllabus notes,
-    predicts the most probable exam topics, and synthesizes full novel questions and answers.
-    """
     def __init__(self, current_year: int = 2023):
         print("Initializing Master ML Orchestrator...")
-        
-        # Initialize sub-systems
-        self.predictor = ExamTrendPredictor(current_year=current_year)
-        self.indexer = FaissExamIndexer()
-        self.rag = ExamRAGPipeline(indexer=self.indexer)
+        self.device = torch.device("cpu")
+        print(f"Compute device: {self.device}")
 
-    def extract_top_topics(self, topic_histories: Dict[str, Dict[int, int]], top_n: int = 1) -> List[str]:
-        """Runs the prediction algorithm and returns the highest likelihood topics."""
-        print(f"\n[1] Running Predictive Trend Analysis on {len(topic_histories)} topics...")
+        self.predictor = ExamTrendPredictor(current_year=current_year)
+        self.nlp_engine = ExamNLPEngine()
+        self.rag = ExamRAGPipeline(indexer=None) 
         
-        predictions = []
-        for topic, history in topic_histories.items():
-            prob = self.predictor.predict_topic_probability(history)
-            predictions.append((prob, topic))
-            
-        # Sort by highest probability descending
-        predictions.sort(reverse=True, key=lambda x: x[0])
-        top_topics = [topic for prob, topic in predictions[:top_n]]
-        
-        print(f"    -> Flagged Top Topics: {top_topics}")
-        return top_topics
+        self.custom_model_path = "saved_models/custom_sciq_model"
+        self.custom_gen_path = "saved_models/custom_sciq_gen"
+        self.custom_model = None
+        self.custom_tokenizer = None
+        self.custom_gen_model = None
+        self.custom_gen_tokenizer = None
+
+        # Load SciQ Classifier (Option 2)
+        if os.path.exists(self.custom_model_path):
+            print(f"Loading SciQ-Net Classifier on CPU...")
+            try:
+                self.custom_tokenizer = AutoTokenizer.from_pretrained(self.custom_model_path)
+                self.custom_model = AutoModelForSequenceClassification.from_pretrained(self.custom_model_path)
+                self.custom_model.eval()
+                print("SciQ Classifier loaded.")
+            except Exception as e:
+                print(f"Warning: Could not load classifier: {e}")
+
+        # Load T5 Generator (Option 2)
+        if os.path.exists(self.custom_gen_path):
+            print(f"Loading SciQ-Net T5 Generator on CPU...")
+            try:
+                self.custom_gen_tokenizer = T5Tokenizer.from_pretrained(self.custom_gen_path)
+                self.custom_gen_model = T5ForConditionalGeneration.from_pretrained(self.custom_gen_path)
+                self.custom_gen_model.eval()
+                print("SciQ T5 Generator loaded.")
+            except Exception as e:
+                print(f"Warning: Could not load generator: {e}")
+
+    def reset_session(self):
+        pass
 
     def generate_full_exam_material(
         self, 
         topic_histories: Dict[str, Dict[int, int]], 
-        course_notes_corpus: List[str]
+        course_notes_corpus: List[str],
+        model_choice: str = "option1"
     ) -> Dict[str, Any]:
-        """
-        Executes the entire end-to-end synthesis loop:
-        Prediction -> Retrieval -> Question Generation -> Answer Generation.
-        """
-        # 1. Build Vector Database Context
-        print("\n[2] Seeding Vector Database with Course Notes...")
-        # 1. Topic Extraction
-        print("\n=== Stage 1: Topic Modeling ===")
-        print("[1] Aggregating multi-document corpus tensors...")
-        course_notes_corpus = [doc for doc in course_notes_corpus if isinstance(doc, str) and len(doc) > 100]
+        print(f"\n--- Starting Generation Pipeline Mode: {model_choice} ---")
+        full_text = " ".join(course_notes_corpus)
         
-        primary_topic = "Fallback Topic"
-        hot_topics_list = []
+        # 1. NLP Topic Analysis
+        hot_topics, distributions = self.nlp_engine.extract_hot_topics(full_text)
+        frequent_concepts, concept_weights = self.nlp_engine.identify_frequent_concepts(full_text)
         
-        try:
-            from data_processing.topic_modeler import extract_frequent_topics
-            print("[1.5] Analyzing Latent Dirichlet Allocation frequencies...")
-            # Extract top 4 concepts currently being discussed in the uploaded PDF
-            dynamic_topics = extract_frequent_topics(course_notes_corpus, num_topics=4, num_keywords_per_topic=5)
-            if dynamic_topics:
-                for k, v in dynamic_topics.items():
-                    unique_keywords = list(dict.fromkeys(v))
-                    raw_keywords = ", ".join(unique_keywords)
-                    title = self.rag.generate_creative_topic_title(raw_keywords)
-                    if title not in hot_topics_list:
-                        hot_topics_list.append(title)
-                
-                if hot_topics_list:
-                    primary_topic = hot_topics_list[0]
-                    print(f"    -> Dynamically Synthesized Topics From File: {hot_topics_list}")
-            
-            if not hot_topics_list:
-                raise ValueError("LDA array failed to format natively.")
-                
-        except Exception as e:
-            print(f"[!] Dynamic topic extraction crashed: {e}. Defaulting to Backend Analytics Arrays.")
-            target_topics = self.extract_top_topics(topic_histories, top_n=4)
-            hot_topics_list = target_topics
-            if hot_topics_list:
-                primary_topic = hot_topics_list[0]
+        primary_topic = hot_topics[0] if hot_topics else "General Concept"
+        
+        # 2. Dynamic confidence calculation
+        dynamic_conf = self.nlp_engine.calculate_dynamic_confidence(hot_topics, distributions, full_text)
+        if model_choice == "option2" and self.custom_model:
+            inputs = self.custom_tokenizer(full_text[:512], return_tensors="pt", truncation=True, padding=True)
+            with torch.no_grad():
+                outputs = self.custom_model(**inputs)
+                probs = torch.softmax(outputs.logits, dim=-1)
+                conf, pred_id = torch.max(probs, dim=-1)
+                dynamic_conf = (dynamic_conf + conf.item()) / 2  # Blend NLP + classifier
 
-        # In a production environment, this index might already be built & loaded from disk.
-        self.indexer.build_index(course_notes_corpus)
-
-        # 3. RAG Synthesize Questions
-        print(f"\n[3] Synthesizing 5 distinct exam questions for topic: '{primary_topic}'...")
-        
+        # 3. Question Generation
         generated_questions = []
-        base_confidence = 0.92
-        
-        # We dynamically fetch massive parameter scales (up to 250 vector chunks) strictly for the UI visualizer
-        answer_context_matches = self.indexer.search(query=primary_topic, top_k=250)
-        answer_context = " | ".join([text for _, text in answer_context_matches])
+        snippets = []
+        for concept in frequent_concepts[:5]:
+            matches = re.finditer(re.escape(concept), full_text, re.IGNORECASE)
+            for m in list(matches)[:1]:
+                start = max(0, m.start() - 200)
+                end = min(len(full_text), m.end() + 300)
+                snippets.append(full_text[start:end])
 
-        for i in range(5):
-            import random
-            import torch
-            # Wipe random weights manually so Python LLMs generate totally novel string variants sequentially
-            torch.manual_seed(random.randint(1, 9999999))
+        corpus_preprocessed = self.nlp_engine._preprocess(full_text[:2000])
+
+        num_questions = 3
+        for i in range(num_questions):
+            print(f"\n[Pipeline] Generating question {i+1}/{num_questions}...")
+            context_chunk = snippets[i % len(snippets)] if snippets else full_text[:1000]
             
-            question_text = self.rag.generate_predicted_question(
-                topic_query=primary_topic, 
-                context_count=12,  # Triple context bounds forcing LLM to read textbook arrays deeply
-                max_new_tokens=5000
-            )
+            if model_choice == "option2" and self.custom_gen_model:
+                input_text = f"generate question: {context_chunk[:500]}"
+                inputs = self.custom_gen_tokenizer(input_text, return_tensors="pt", truncation=True, max_length=512)
+                with torch.no_grad():
+                    outputs = self.custom_gen_model.generate(**inputs, max_length=100)
+                    question_text = self.custom_gen_tokenizer.decode(outputs[0], skip_special_tokens=True)
+            else:
+                question_text = self.rag.generate_predicted_question(
+                    topic_query=primary_topic, 
+                    context_override=context_chunk,
+                    max_new_tokens=128
+                )
             
-            # Apply strict statistical noise generation to emulate probability offsets
-            prob_variance = random.uniform(-0.10, 0.08)
-            q_prob = min(max(base_confidence + prob_variance, 0.45), 0.99)
-            
+            q_prob = self.nlp_engine.calculate_question_probability(question_text, hot_topics, corpus_preprocessed=corpus_preprocessed)
             generated_questions.append({
                 "id": i + 1,
                 "question": question_text,
-                "probability": f"{q_prob * 100:.1f}%"
+                "probability": f"{q_prob}%",
+                "prediction_tag": primary_topic
             })
 
-        output_payload = {
+        print("\n*** Full Pipeline Execution Complete ***\n")
+        return {
             "predicted_topic": primary_topic,
-            "hot_topics": hot_topics_list,
-            "overall_confidence": f"{base_confidence * 100:.1f}%",
+            "hot_topics": hot_topics,
+            "topic_distribution": distributions,
+            "frequent_concepts": frequent_concepts,
+            "overall_confidence": f"{dynamic_conf * 100:.1f}%",
             "questions": generated_questions,
-            "retrieved_context_used": answer_context
+            "retrieved_context_used": full_text[:2000],
+            "engine": "Qwen-2.5 (Instruction Mode)" if model_choice == "option1" else "SciQ-Net (BERT+T5 Engine)"
         }
 
-        print("\n*** Full Pipeline Execution Complete ***\n")
-        return output_payload
+    def solve_uploaded_questions(self, uploaded_text: List[str], model_choice: str = "option1") -> Dict[str, Any]:
+        print(f"\n--- Starting SOLVE Mode ---")
+        full_text = " ".join(uploaded_text)
+        raw_questions = re.split(r'(?:\d+\.|\?|\n)(?=\s*[A-Z])', full_text)
+        
+        cleaned_questions = []
+        for q in raw_questions:
+            q = q.strip()
+            if len(q) < 40 or len(q) > 600: continue
+            if "@" in q or "http" in q: continue
+            if "University" in q or "Dept" in q or "Department" in q: continue
+            if not any(word in q.lower() for word in ["what", "how", "explain", "describe", "define", "calculate", "derive", "why", "list"]):
+                if not q.endswith("?"): continue
+            cleaned_questions.append(q if q.endswith("?") else q + "?")
+        
+        target_questions = cleaned_questions[:5] if cleaned_questions else [full_text[:300]]
+        solved_questions = []
+        
+        for i, q in enumerate(target_questions):
+            print(f"\n[Solve] Answering question {i+1}/{len(target_questions)}...")
+            if model_choice == "option2" and self.custom_gen_model:
+                input_text = f"answer question: {q}"
+                inputs = self.custom_gen_tokenizer(input_text, return_tensors="pt", truncation=True, max_length=512)
+                with torch.no_grad():
+                    outputs = self.custom_gen_model.generate(**inputs, max_length=200)
+                    answer = self.custom_gen_tokenizer.decode(outputs[0], skip_special_tokens=True)
+            else:
+                answer = self.rag.generate_model_answer(exam_question=q, course_notes_context=full_text)
+            
+            solved_questions.append({
+                "id": i + 1,
+                "question": q,
+                "answer": answer,
+                "probability": "100% (Input Source)"
+            })
+            
+        return {
+            "predicted_topic": "Direct Paper Solution",
+            "hot_topics": ["Exam Solving"],
+            "topic_distribution": {"Solving": 100},
+            "overall_confidence": "Direct Analysis",
+            "questions": solved_questions,
+            "retrieved_context_used": full_text[:1000],
+            "engine": "RAG-Enhanced Solver"
+        }
 
-if __name__ == "__main__":
-    # --- Simulated Data Inputs ---
-    
-    # 1. Topic Historical Frequencies (from our LDA NLP pipeline)
-    simulated_histories = {
-        "Recurrent Neural Networks": {2020: 1, 2021: 1, 2022: 4, 2023: 6},  # High Momentum
-        "Support Vector Machines": {2020: 4, 2021: 2, 2022: 1, 2023: 0},    # Dying out
-        "Gradient Descent": {2020: 3, 2021: 3, 2022: 3, 2023: 3}          # Stable
-    }
-    
-    # 2. Raw Syllabus Course Notes (from our PDF PyMuPDF pipeline)
-    course_notes = [
-        "A Recurrent Neural Network (RNN) deals with sequential data by utilizing hidden states that act as memory.",
-        "The vanishing gradient problem occurs when training long RNNs, leading to failure in learning long-term dependencies.",
-        "Support Vector Machines find the optimal hyperplane maximizing the mathematical margin between classes.",
-        "Gradient descent minimizes the cost function by iteratively stepping in the negative direction of the gradient."
-    ]
+    def classify_uploaded_text(self, texts: List[str], model_choice: str = "option1") -> Dict[str, Any]:
+        full_text = " ".join(texts)
+        hot_topics, distributions = self.nlp_engine.extract_hot_topics(full_text)
+        dynamic_conf = self.nlp_engine.calculate_dynamic_confidence(hot_topics, distributions, full_text)
+        
+        # Use Qwen RAG for Option 1 topic identification
+        if model_choice == "option1":
+            primary_label = self.rag.generate_creative_topic_title(
+                ", ".join(hot_topics[:3])
+            ) if hot_topics and hot_topics[0] != "Insufficient Content" else "General Academic Subject"
+        else:
+            # Use SciQ classifier for Option 2
+            primary_label = "Academic Subject"
+            if self.custom_model:
+                inputs = self.custom_tokenizer(full_text[:512], return_tensors="pt", truncation=True, padding=True)
+                with torch.no_grad():
+                    outputs = self.custom_model(**inputs)
+                    probs = torch.softmax(outputs.logits, dim=-1)
+                    conf, pred_id = torch.max(probs, dim=-1)
+                    dynamic_conf = (dynamic_conf + conf.item()) / 2
+                    mapping_path = os.path.join(self.custom_model_path, "topic_mapping.json")
+                    if os.path.exists(mapping_path):
+                        with open(mapping_path, 'r') as f:
+                            mapping = json.load(f)
+                        primary_label = mapping.get(str(pred_id.item()), "Science Concepts")
+            else:
+                primary_label = hot_topics[0] if hot_topics else "Unclassified"
 
-    # --- Execute Orchestrator ---
-    orchestrator = MasterExamOrchestrator(current_year=2023)
-    
-    final_exam_payload = orchestrator.generate_full_exam_material(
-        topic_histories=simulated_histories, 
-        course_notes_corpus=course_notes
-    )
-    
-    print("=================== END TO END RESULT ===================")
-    print(json.dumps(final_exam_payload, indent=4))
-    print("=========================================================")
+        return {
+            "predicted_topic": primary_label,
+            "hot_topics": hot_topics,
+            "topic_distribution": distributions,
+            "overall_confidence": f"{dynamic_conf * 100:.1f}%",
+            "questions": [],
+            "engine": "Qwen-2.5 (Topic Analyzer)" if model_choice == "option1" else "SciQ-Net + LDA Analyzer"
+        }
+
+    def generate_answer_for_question(self, question: str, context: str) -> str:
+        return self.rag.generate_model_answer(exam_question=question, course_notes_context=context)

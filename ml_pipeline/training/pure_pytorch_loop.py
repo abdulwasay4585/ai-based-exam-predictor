@@ -1,12 +1,15 @@
 import torch
+import json
+import pandas as pd
+import os
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 from sklearn.model_selection import train_test_split
 from tqdm import tqdm
 from typing import List
+from sklearn.metrics import accuracy_score
 
 class ExamTopicDataset(Dataset):
-    """Custom PyTorch Dataset for loading Exam text and mapping it to correct topics."""
     def __init__(self, encodings: dict, labels: List[int]):
         self.encodings = encodings
         self.labels = labels
@@ -24,116 +27,107 @@ def train_pure_pytorch(
     labels: List[int], 
     num_labels: int,
     model_name: str = "bert-base-uncased",
-    output_dir: str = "../../saved_models/pytorch_topic_predictor",
-    epochs: int = 3,
-    batch_size: int = 8,
+    output_dir: str = "saved_models/custom_sciq_model",
+    epochs: int = 5,
+    batch_size: int = 16,
     learning_rate: float = 2e-5
 ):
-    """
-    Explicit PyTorch training loop for BERT fine-tuning.
-    """
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cpu")
     print(f"Using device: {device}")
 
-    # 1. Initialize tokenizer and model
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     model = AutoModelForSequenceClassification.from_pretrained(model_name, num_labels=num_labels)
     model.to(device)
 
-    # 2. Split and Tokenize
-    train_texts, val_texts, train_labels, val_labels = train_test_split(texts, labels, test_size=0.2, random_state=42)
+    train_texts, val_texts, train_labels, val_labels = train_test_split(texts, labels, test_size=0.1, random_state=42)
     
-    train_encodings = tokenizer(train_texts, truncation=True, padding=True, max_length=512)
-    val_encodings = tokenizer(val_texts, truncation=True, padding=True, max_length=512)
+    train_encodings = tokenizer(train_texts, truncation=True, padding=True, max_length=128)
+    val_encodings = tokenizer(val_texts, truncation=True, padding=True, max_length=128)
 
-    # 3. Create Datasets and DataLoaders
     train_dataset = ExamTopicDataset(train_encodings, train_labels)
     val_dataset = ExamTopicDataset(val_encodings, val_labels)
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
 
-    # 4. Set up Optimizer
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
-
-    # 5. Training Loop
-    best_val_loss = float('inf')
+    best_accuracy = 0
 
     for epoch in range(epochs):
-        print(f"\n======== Epoch {epoch + 1} / {epochs} ========")
-        
-        # --- TRAINING PHASE ---
         model.train()
         total_train_loss = 0
+        train_progress = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs} [Train]")
         
-        train_progress = tqdm(train_loader, desc="Training", leave=False)
         for batch in train_progress:
-            # Move batch tensors to device (GPU/CPU)
-            optimizer.zero_grad() # Clear previous gradients
-            
+            optimizer.zero_grad()
             input_ids = batch['input_ids'].to(device)
             attention_mask = batch['attention_mask'].to(device)
             target_labels = batch['labels'].to(device)
             
-            # Forward pass
             outputs = model(input_ids, attention_mask=attention_mask, labels=target_labels)
             loss = outputs.loss
-            total_train_loss += loss.item()
-            
-            # Backward pass
             loss.backward()
-            
-            # Update weights
             optimizer.step()
             
-            train_progress.set_postfix({'Loss': f"{loss.item():.4f}"})
+            total_train_loss += loss.item()
+            train_progress.set_postfix({'loss': f"{loss.item():.4f}"})
 
-        avg_train_loss = total_train_loss / len(train_loader)
-        
-        # --- VALIDATION PHASE ---
+        # Validation
         model.eval()
-        total_val_loss = 0
-        correct_predictions = 0
-        
-        with torch.no_grad(): # Disable gradient calculation for validation speed
-            val_progress = tqdm(val_loader, desc="Validating", leave=False)
-            for batch in val_progress:
+        all_preds = []
+        all_labels = []
+        with torch.no_grad():
+            for batch in val_loader:
                 input_ids = batch['input_ids'].to(device)
                 attention_mask = batch['attention_mask'].to(device)
                 target_labels = batch['labels'].to(device)
                 
-                outputs = model(input_ids, attention_mask=attention_mask, labels=target_labels)
-                loss = outputs.loss
-                total_val_loss += loss.item()
+                outputs = model(input_ids, attention_mask=attention_mask)
+                preds = torch.argmax(outputs.logits, dim=-1)
                 
-                # Calculate accuracy
-                logits = outputs.logits
-                predictions = torch.argmax(logits, dim=-1)
-                correct_predictions += (predictions == target_labels).sum().item()
+                all_preds.extend(preds.cpu().numpy())
+                all_labels.extend(target_labels.cpu().numpy())
 
-        avg_val_loss = total_val_loss / len(val_loader)
-        accuracy = correct_predictions / len(val_dataset)
-        
-        print(f"Training Loss: {avg_train_loss:.4f} | Validation Loss: {avg_val_loss:.4f} | Validation Accuracy: {accuracy:.4f}")
-        
-        # 6. Save BEST model
-        if avg_val_loss < best_val_loss:
-            best_val_loss = avg_val_loss
-            print(f">>> Validation loss improved! Saving model to {output_dir}")
+        acc = accuracy_score(all_labels, all_preds)
+        print(f"Epoch {epoch+1} - Validation Accuracy: {acc:.4f}")
+
+        if acc > best_accuracy:
+            best_accuracy = acc
+            print(f"New Best Accuracy! Saving to {output_dir}")
+            os.makedirs(output_dir, exist_ok=True)
             model.save_pretrained(output_dir)
             tokenizer.save_pretrained(output_dir)
 
-    print("\nTraining Complete!")
+    print(f"Training Complete. Best Accuracy: {best_accuracy:.4f}")
     return model, tokenizer
 
-if __name__ == "__main__":
-    mock_questions = [
-        "Explain backpropagation in deep neural networks.",
-        "How does a transformer handle self attention?",
-        "Define gradient descent and learning rate.",
-        "What is the time complexity of bubble sort?",
-        "Explain Dijkstra's algorithm for shortest paths."
-    ]
-    mock_labels = [0, 0, 0, 1, 1] 
+def run_custom_training(num_samples=1000):
+    train_path = "ml_pipeline/data/topic_data_train.json"
+    
+    if not os.path.exists(train_path):
+        print("Data not found.")
+        return
 
-    # train_pure_pytorch(mock_questions, mock_labels, num_labels=2)
+    train_df = pd.read_json(train_path, lines=True).sample(num_samples)
+    
+    unique_topics = train_df['topic'].unique().tolist()
+    topic_to_id = {topic: i for i, topic in enumerate(unique_topics)}
+    id_to_topic = {i: topic for topic, i in topic_to_id.items()}
+    
+    os.makedirs("saved_models/custom_sciq_model", exist_ok=True)
+    with open("saved_models/custom_sciq_model/topic_mapping.json", 'w') as f:
+        json.dump(id_to_topic, f)
+
+    texts = train_df['text'].tolist()
+    labels = train_df['topic'].map(topic_to_id).tolist()
+
+    train_pure_pytorch(
+        texts=texts,
+        labels=labels,
+        num_labels=len(unique_topics),
+        epochs=5,
+        batch_size=16
+    )
+
+if __name__ == "__main__":
+    run_custom_training()
